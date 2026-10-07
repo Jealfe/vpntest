@@ -18,7 +18,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 APP_NAME = "VPN Diagnostic"
-APP_VERSION = "0.1.1"
+APP_VERSION = "0.2.0"
 VPN_WORDS = (
     "vpn", "wireguard", "wintun", "tap", "tun", "openvpn", "amnezia",
     "outline", "clash", "sing-box", "singbox", "v2ray", "xray", "warp",
@@ -283,6 +283,97 @@ def test_server(folder: Path, host: str, port_text: str, log) -> None:
             lines.append(f"\nTest-NetConnection exit={code}\n{out}")
 
     save(folder / "target_test.txt", "\n".join(lines) + "\n")
+
+
+
+def start_packet_capture(session: Path, log) -> None:
+    """Start a short UDP-only Packet Monitor trace for the VPN attempt."""
+    capture = session / "packet_capture"
+    capture.mkdir(parents=True, exist_ok=True)
+    etl = capture / "vpn_attempt.etl"
+
+    log("Запускаю Packet Monitor (UDP, только заголовки)...")
+    steps = []
+
+    # Clean up a stale Packet Monitor session/filter left by an interrupted run.
+    for cmd in (
+        ["pktmon", "stop"],
+        ["pktmon", "filter", "remove"],
+        ["pktmon", "reset"],
+    ):
+        code, out = run(cmd, 15)
+        steps.append("$ " + " ".join(cmd) + f"\nexit={code}\n{out}\n")
+
+    code, out = run(
+        ["pktmon", "filter", "add", "VPNDiagUDP", "-t", "UDP"],
+        15,
+    )
+    steps.append(
+        "$ pktmon filter add VPNDiagUDP -t UDP"
+        + f"\nexit={code}\n{out}\n"
+    )
+
+    code, out = run(
+        [
+            "pktmon", "start", "--capture",
+            "--comp", "nics",
+            "--pkt-size", "64",
+            "--file-name", str(etl),
+        ],
+        20,
+    )
+    steps.append(
+        "$ pktmon start --capture --comp nics --pkt-size 64 ..."
+        + f"\nexit={code}\n{out}\n"
+    )
+
+    save(capture / "pktmon_start.txt", "\n".join(steps))
+    if code == 0:
+        log("Packet Monitor запущен. Теперь воспроизведите ошибку VPN.")
+    else:
+        log("Packet Monitor не запустился; остальная диагностика продолжится.")
+
+
+def stop_packet_capture(session: Path, log) -> None:
+    """Stop Packet Monitor, save counters/text trace, then delete raw ETL."""
+    capture = session / "packet_capture"
+    capture.mkdir(parents=True, exist_ok=True)
+    etl = capture / "vpn_attempt.etl"
+    txt = capture / "vpn_attempt_packets.txt"
+
+    log("Останавливаю Packet Monitor и сохраняю статистику...")
+    code, out = run(["pktmon", "counters", "--json"], 20)
+    save(capture / "pktmon_counters.json", f"Exit code: {code}\n\n{out}\n")
+
+    code, out = run(["pktmon", "status"], 15)
+    save(capture / "pktmon_status_before_stop.txt", f"Exit code: {code}\n\n{out}\n")
+
+    code, out = run(["pktmon", "stop"], 20)
+    save(capture / "pktmon_stop.txt", f"Exit code: {code}\n\n{out}\n")
+
+    if etl.exists():
+        code, out = run(
+            [
+                "pktmon", "etl2txt", str(etl),
+                "--out", str(txt),
+                "--brief", "--no-ethernet",
+            ],
+            90,
+        )
+        save(
+            capture / "pktmon_convert.txt",
+            f"Exit code: {code}\n\n{out}\n",
+        )
+
+        # The ETL can contain the first bytes of packet payload. We only keep the
+        # decoded brief text, which contains packet metadata/headers.
+        try:
+            etl.unlink()
+        except OSError as exc:
+            save(capture / "pktmon_etl_cleanup_error.txt", str(exc) + "\n")
+
+    run(["pktmon", "filter", "remove"], 15)
+    log("Packet Monitor завершён.")
 
 
 def collect_events(folder: Path, minutes: int, log) -> None:
@@ -641,6 +732,7 @@ class App(tk.Tk):
             self.log("Снимок ДО: начало.")
             collect_snapshot(before, deep, self.log)
             test_server(before, host, port, self.log)
+            start_packet_capture(self.session, self.log)
 
             self.log(
                 "Снимок ДО готов. Теперь подключайте VPN и дождитесь ошибки."
@@ -690,6 +782,7 @@ class App(tk.Tk):
             after = self.session / "after"
 
             self.log("Снимок ПОСЛЕ: начало.")
+            stop_packet_capture(self.session, self.log)
             collect_snapshot(after, deep, self.log)
             test_server(after, host, port, self.log)
 
