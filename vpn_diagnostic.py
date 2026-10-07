@@ -18,7 +18,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 APP_NAME = "VPN Diagnostic"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.1.1"
 VPN_WORDS = (
     "vpn", "wireguard", "wintun", "tap", "tun", "openvpn", "amnezia",
     "outline", "clash", "sing-box", "singbox", "v2ray", "xray", "warp",
@@ -79,6 +79,15 @@ def redact(text: str) -> str:
         return text
     text = re.sub(r"(?i)([A-Z]:\\Users\\)[^\\\r\n]+", r"\1<USER>", text)
     text = re.sub(r"(?i)\b(?:[0-9A-F]{2}[-:]){5}[0-9A-F]{2}\b", "<MAC>", text)
+    # Windows SCM Event 7045 may persist a VPN configuration embedded in a
+    # temporary service command line. Never place cryptographic secrets from
+    # that command line into the diagnostic archive.
+    text = re.sub(
+        r"(?im)^(\s*(?:PrivateKey|PresharedKey|HeaderProtectionKey|"
+        r"Password|Passphrase|Token|Secret)\s*=\s*).*$",
+        r"\1<REDACTED>",
+        text,
+    )
     return text
 
 
